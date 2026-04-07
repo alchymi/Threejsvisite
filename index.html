@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <title>3D Visite - First Person POC</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { overflow: hidden; background: #000; }
+    canvas { display: block; }
+    #blocker {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 10;
+    }
+    #blocker .panel {
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 16px;
+      padding: 40px 50px;
+      text-align: center;
+      color: #fff;
+      font-family: system-ui, sans-serif;
+      backdrop-filter: blur(12px);
+    }
+    #blocker h1 { font-size: 22px; margin-bottom: 12px; }
+    #blocker p { font-size: 14px; opacity: 0.7; line-height: 1.6; }
+    #blocker .keys { margin-top: 16px; font-size: 13px; opacity: 0.5; }
+    #scene-picker {
+      position: fixed; top: 16px; left: 16px; z-index: 5;
+      font-family: system-ui, sans-serif;
+    }
+    #scene-picker select {
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 14px;
+      backdrop-filter: blur(8px);
+      cursor: pointer;
+    }
+    #info {
+      position: fixed; bottom: 16px; left: 16px; z-index: 5;
+      color: rgba(255,255,255,0.4);
+      font: 12px system-ui, sans-serif;
+    }
+  </style>
+</head>
+<body>
+
+<div id="blocker">
+  <div class="panel">
+    <h1>3D Visite</h1>
+    <p>Cliquez pour entrer dans la scène</p>
+    <div class="keys">ZQSD / WASD — Se déplacer &nbsp;|&nbsp; Souris — Regarder &nbsp;|&nbsp; Espace — Sauter</div>
+  </div>
+</div>
+
+<div id="scene-picker">
+  <select id="scene-select">
+    <option value="scenes/ArcadeStation.glb">Arcade Station</option>
+    <option value="scenes/space_ship_hallway.glb">Space Ship Hallway</option>
+    <option value="scenes/space_station_scene_hd.glb">Space Station HD</option>
+  </select>
+</div>
+
+<div id="info">Échap pour libérer le curseur</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { Octree } from 'three/addons/math/Octree.js';
+import { OctreeHelper } from 'three/addons/helpers/OctreeHelper.js';
+import { Capsule } from 'three/addons/math/Capsule.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { GammaCorrectionShader } from 'three/addons/shaders/GammaCorrectionShader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import GUI from 'https://cdn.jsdelivr.net/npm/lil-gui@0.19/+esm';
+
+// --- Setup ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 500);
+camera.position.set(0, 1.6, 3);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// Environment map (studio-like reflections & ambient)
+const pmremGenerator = new THREE.PMREMGenerator(renderer);
+const envTexture = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+scene.environment = envTexture;
+pmremGenerator.dispose();
+
+// --- Lights ---
+// Soft ambient fill
+const ambientLight = new THREE.AmbientLight(0xd4e0ff, 0.4);
+scene.add(ambientLight);
+
+// Hemisphere: sky blue above, warm ground bounce
+const hemiLight = new THREE.HemisphereLight(0x8ec8f0, 0x6b4423, 0.5);
+scene.add(hemiLight);
+
+// Main directional (sun) with shadows
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 1.5);
+dirLight.position.set(8, 12, 5);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.near = 0.5;
+dirLight.shadow.camera.far = 60;
+dirLight.shadow.camera.left = -20;
+dirLight.shadow.camera.right = 20;
+dirLight.shadow.camera.top = 20;
+dirLight.shadow.camera.bottom = -20;
+dirLight.shadow.bias = -0.001;
+dirLight.shadow.normalBias = 0.02;
+scene.add(dirLight);
+
+// Subtle fill light from the opposite side
+const fillLight = new THREE.DirectionalLight(0xc0d0ff, 0.3);
+fillLight.position.set(-5, 4, -6);
+scene.add(fillLight);
+
+// --- Post-processing ---
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight),
+  0.3,  // strength
+  0.4,  // radius
+  0.85  // threshold
+);
+composer.addPass(bloomPass);
+
+// Vignette shader
+const VignetteShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    offset: { value: 1.0 },
+    darkness: { value: 1.2 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float offset;
+    uniform float darkness;
+    varying vec2 vUv;
+    void main() {
+      vec4 texel = texture2D(tDiffuse, vUv);
+      vec2 uv = (vUv - 0.5) * 2.0;
+      float vig = 1.0 - dot(uv, uv) * darkness * 0.5;
+      vig = clamp(vig, 0.0, 1.0);
+      vig = mix(1.0, vig, offset);
+      gl_FragColor = vec4(texel.rgb * vig, texel.a);
+    }
+  `
+};
+const vignettePass = new ShaderPass(VignetteShader);
+composer.addPass(vignettePass);
+
+composer.addPass(new OutputPass());
+
+// --- GUI (lil-gui) ---
+const gui = new GUI({ title: 'Ambiance' });
+
+const params = {
+  ambientIntensity: ambientLight.intensity,
+  ambientColor: '#' + ambientLight.color.getHexString(),
+  dirIntensity: dirLight.intensity,
+  dirColor: '#' + dirLight.color.getHexString(),
+  dirPosX: dirLight.position.x,
+  dirPosY: dirLight.position.y,
+  dirPosZ: dirLight.position.z,
+  fillIntensity: fillLight.intensity,
+  hemiIntensity: hemiLight.intensity,
+  hemiSkyColor: '#' + hemiLight.color.getHexString(),
+  hemiGroundColor: '#' + hemiLight.groundColor.getHexString(),
+  exposure: renderer.toneMappingExposure,
+  shadows: true,
+  bloomStrength: bloomPass.strength,
+  bloomRadius: bloomPass.radius,
+  bloomThreshold: bloomPass.threshold,
+  vignetteOffset: vignettePass.uniforms.offset.value,
+  vignetteDarkness: vignettePass.uniforms.darkness.value,
+  bgColor: '#' + scene.background.getHexString(),
+};
+
+const fLight = gui.addFolder('Lumières');
+fLight.add(params, 'ambientIntensity', 0, 3, 0.01).name('Ambient').onChange(v => ambientLight.intensity = v);
+fLight.addColor(params, 'ambientColor').name('Ambient Color').onChange(v => ambientLight.color.set(v));
+fLight.add(params, 'dirIntensity', 0, 5, 0.01).name('Soleil').onChange(v => dirLight.intensity = v);
+fLight.addColor(params, 'dirColor').name('Soleil Color').onChange(v => dirLight.color.set(v));
+fLight.add(params, 'dirPosX', -20, 20, 0.1).name('Soleil X').onChange(v => dirLight.position.x = v);
+fLight.add(params, 'dirPosY', 0, 30, 0.1).name('Soleil Y').onChange(v => dirLight.position.y = v);
+fLight.add(params, 'dirPosZ', -20, 20, 0.1).name('Soleil Z').onChange(v => dirLight.position.z = v);
+fLight.add(params, 'fillIntensity', 0, 2, 0.01).name('Fill').onChange(v => fillLight.intensity = v);
+fLight.add(params, 'hemiIntensity', 0, 3, 0.01).name('Hémisphère').onChange(v => hemiLight.intensity = v);
+fLight.addColor(params, 'hemiSkyColor').name('Ciel').onChange(v => hemiLight.color.set(v));
+fLight.addColor(params, 'hemiGroundColor').name('Sol').onChange(v => hemiLight.groundColor.set(v));
+fLight.add(params, 'exposure', 0.1, 3, 0.01).name('Exposure').onChange(v => renderer.toneMappingExposure = v);
+fLight.add(params, 'shadows').name('Ombres').onChange(v => renderer.shadowMap.enabled = v);
+fLight.addColor(params, 'bgColor').name('Fond').onChange(v => scene.background.set(v));
+
+const fPost = gui.addFolder('Post-processing');
+fPost.add(params, 'bloomStrength', 0, 3, 0.01).name('Bloom Force').onChange(v => bloomPass.strength = v);
+fPost.add(params, 'bloomRadius', 0, 2, 0.01).name('Bloom Rayon').onChange(v => bloomPass.radius = v);
+fPost.add(params, 'bloomThreshold', 0, 1, 0.01).name('Bloom Seuil').onChange(v => bloomPass.threshold = v);
+fPost.add(params, 'vignetteOffset', 0, 2, 0.01).name('Vignette').onChange(v => vignettePass.uniforms.offset.value = v);
+fPost.add(params, 'vignetteDarkness', 0, 3, 0.01).name('Vig. Darkness').onChange(v => vignettePass.uniforms.darkness.value = v);
+
+// --- Invisible floor ---
+const floorGeom = new THREE.PlaneGeometry(200, 200);
+const floorMat = new THREE.MeshBasicMaterial({ visible: false });
+const floorMesh = new THREE.Mesh(floorGeom, floorMat);
+floorMesh.rotation.x = -Math.PI / 2;
+floorMesh.position.y = -0.5;
+scene.add(floorMesh);
+
+// --- Controls ---
+const controls = new PointerLockControls(camera, document.body);
+const blocker = document.getElementById('blocker');
+
+blocker.addEventListener('click', () => controls.lock());
+controls.addEventListener('lock', () => blocker.style.display = 'none');
+controls.addEventListener('unlock', () => blocker.style.display = 'flex');
+
+// --- Physics ---
+const GRAVITY = 25;
+const JUMP_FORCE = 8;
+const SPEED = 20;
+const PLAYER_HEIGHT = 1.6;
+const PLAYER_RADIUS = 0.35;
+
+const worldOctree = new Octree();
+const playerCollider = new Capsule(
+  new THREE.Vector3(0, PLAYER_RADIUS, 0),
+  new THREE.Vector3(0, PLAYER_HEIGHT - PLAYER_RADIUS, 0),
+  PLAYER_RADIUS
+);
+
+const playerVelocity = new THREE.Vector3();
+let onFloor = false;
+
+const keys = {};
+document.addEventListener('keydown', (e) => keys[e.code] = true);
+document.addEventListener('keyup', (e) => keys[e.code] = false);
+
+function playerCollisions() {
+  const result = worldOctree.capsuleIntersect(playerCollider);
+  onFloor = false;
+
+  if (result) {
+    onFloor = result.normal.y > 0.5;
+
+    if (!onFloor) {
+      playerVelocity.addScaledVector(result.normal, -result.normal.dot(playerVelocity));
+    }
+
+    if (result.depth >= 1e-10) {
+      playerCollider.translate(result.normal.multiplyScalar(result.depth));
+    }
+  }
+}
+
+let manipulateMode = false;
+
+function updateMovement(delta) {
+  if (!controls.isLocked) return;
+
+  // In manipulate mode, skip all physics — position is driven by GUI
+  if (manipulateMode) return;
+
+  // Clamp delta to avoid huge jumps on tab-switch
+  const dt = Math.min(delta, 0.05);
+
+  // Gravity
+  if (!onFloor) {
+    playerVelocity.y -= GRAVITY * dt;
+  }
+
+  // Damping
+  const damping = Math.exp(-8 * dt) ;
+  if (onFloor) {
+    playerVelocity.x *= damping;
+    playerVelocity.z *= damping;
+  } else {
+    playerVelocity.x *= Math.exp(-2 * dt);
+    playerVelocity.z *= Math.exp(-2 * dt);
+  }
+
+  // Direction from keys (ZQSD + WASD)
+  const forward = (keys['KeyW'] || keys['KeyZ']) ? 1 : (keys['KeyS'] ? -1 : 0);
+  const right = (keys['KeyD']) ? 1 : ((keys['KeyA'] || keys['KeyQ']) ? -1 : 0);
+
+  // Get camera-relative horizontal direction
+  const cameraDirection = new THREE.Vector3();
+  camera.getWorldDirection(cameraDirection);
+  cameraDirection.y = 0;
+  cameraDirection.normalize();
+
+  const sideDirection = new THREE.Vector3();
+  sideDirection.crossVectors(cameraDirection, camera.up).normalize();
+
+  const moveDirection = new THREE.Vector3();
+  moveDirection.addScaledVector(cameraDirection, forward);
+  moveDirection.addScaledVector(sideDirection, right);
+  moveDirection.normalize();
+
+  const accel = onFloor ? SPEED : SPEED * 0.3;
+  playerVelocity.add(moveDirection.multiplyScalar(accel * dt));
+
+  // Jump
+  if (keys['Space'] && onFloor) {
+    playerVelocity.y = JUMP_FORCE;
+  }
+
+  // Sub-step collision for stability
+  const steps = 3;
+  const stepDelta = dt / steps;
+  for (let i = 0; i < steps; i++) {
+    playerCollider.translate(playerVelocity.clone().multiplyScalar(stepDelta));
+    playerCollisions();
+  }
+
+  // Sync camera to collider
+  const colliderCenter = new THREE.Vector3();
+  playerCollider.getCenter(colliderCenter);
+  camera.position.copy(colliderCenter);
+  camera.position.y = playerCollider.end.y + PLAYER_RADIUS;
+
+  // Fall reset — teleport back to spawn if too low
+  if (camera.position.y < -30) {
+    resetPlayer();
+  }
+}
+
+let spawnPoint = new THREE.Vector3(0, 2, 0);
+
+function resetPlayer() {
+  playerVelocity.set(0, 0, 0);
+  playerCollider.start.copy(spawnPoint);
+  playerCollider.end.copy(spawnPoint);
+  playerCollider.start.y += PLAYER_RADIUS;
+  playerCollider.end.y += PLAYER_HEIGHT - PLAYER_RADIUS;
+}
+
+// Teleport player to specific position (from GUI)
+function teleportPlayer(x, y, z) {
+  playerVelocity.set(0, 0, 0);
+  const pos = new THREE.Vector3(x, y, z);
+  playerCollider.start.copy(pos);
+  playerCollider.end.copy(pos);
+  playerCollider.start.y += PLAYER_RADIUS;
+  playerCollider.end.y += PLAYER_HEIGHT - PLAYER_RADIUS;
+}
+
+// --- GUI: Player / Spawn ---
+const playerParams = {
+  posX: 0, posY: 2, posZ: 0,
+  manipulate: false,
+  floorY: 0,
+  floorVisible: false,
+  floorSize: 200,
+};
+
+const fPlayer = gui.addFolder('Joueur / Spawn');
+
+// Manipulate toggle
+fPlayer.add(playerParams, 'manipulate').name('✋ Manipuler').onChange(v => {
+  manipulateMode = v;
+  if (v) {
+    // Freeze velocity when entering manipulate mode
+    playerVelocity.set(0, 0, 0);
+    // Sync sliders to current position
+    playerParams.posX = +camera.position.x.toFixed(2);
+    playerParams.posY = +camera.position.y.toFixed(2);
+    playerParams.posZ = +camera.position.z.toFixed(2);
+  } else {
+    // When leaving manipulate, sync collider to current slider position
+    teleportPlayer(playerParams.posX, playerParams.posY, playerParams.posZ);
+  }
+});
+
+// Position sliders — in manipulate mode, these drive the player position live
+const posXCtrl = fPlayer.add(playerParams, 'posX', -100, 100, 0.1).name('Pos X').listen()
+  .onChange(v => { if (manipulateMode) teleportPlayer(v, playerParams.posY, playerParams.posZ); });
+const posYCtrl = fPlayer.add(playerParams, 'posY', -100, 100, 0.1).name('Pos Y').listen()
+  .onChange(v => { if (manipulateMode) teleportPlayer(playerParams.posX, v, playerParams.posZ); });
+const posZCtrl = fPlayer.add(playerParams, 'posZ', -100, 100, 0.1).name('Pos Z').listen()
+  .onChange(v => { if (manipulateMode) teleportPlayer(playerParams.posX, playerParams.posY, v); });
+
+// Save spawn — stores current camera position as new spawn
+fPlayer.add({ saveSpawn() {
+  spawnPoint.set(
+    camera.position.x,
+    camera.position.y - PLAYER_HEIGHT + PLAYER_RADIUS,
+    camera.position.z
+  );
+  spawnParams.spawnX = +spawnPoint.x.toFixed(2);
+  spawnParams.spawnY = +spawnPoint.y.toFixed(2);
+  spawnParams.spawnZ = +spawnPoint.z.toFixed(2);
+  console.log(`Spawn enregistré: ${spawnPoint.x.toFixed(2)}, ${spawnPoint.y.toFixed(2)}, ${spawnPoint.z.toFixed(2)}`);
+}}, 'saveSpawn').name('💾 Enregistrer Spawn');
+
+// Respawn — teleport to saved spawn
+fPlayer.add({ respawn() {
+  resetPlayer();
+  if (manipulateMode) {
+    playerParams.posX = +camera.position.x.toFixed(2);
+    playerParams.posY = +camera.position.y.toFixed(2);
+    playerParams.posZ = +camera.position.z.toFixed(2);
+  }
+}}, 'respawn').name('🔄 Respawn');
+
+// Spawn coordinates display
+const spawnParams = { spawnX: 0, spawnY: 2, spawnZ: 0 };
+fPlayer.add(spawnParams, 'spawnX').name('Spawn X').listen().disable();
+fPlayer.add(spawnParams, 'spawnY').name('Spawn Y').listen().disable();
+fPlayer.add(spawnParams, 'spawnZ').name('Spawn Z').listen().disable();
+
+// --- GUI: Sol invisible ---
+const fFloor = gui.addFolder('Sol');
+fFloor.add(playerParams, 'floorY', -50, 50, 0.1).name('Hauteur').onChange(v => {
+  floorMesh.position.y = v;
+});
+fFloor.add(playerParams, 'floorVisible').name('Visible (debug)').onChange(v => {
+  floorMat.visible = v;
+  if (v) {
+    floorMat.color = new THREE.Color(0x444444);
+    floorMat.wireframe = true;
+    floorMat.transparent = true;
+    floorMat.opacity = 0.3;
+  }
+});
+fFloor.add(playerParams, 'floorSize', 10, 500, 10).name('Taille').onChange(v => {
+  floorMesh.geometry.dispose();
+  floorMesh.geometry = new THREE.PlaneGeometry(v, v);
+});
+
+// --- GLB Loading ---
+const loader = new GLTFLoader();
+let currentModel = null;
+
+function loadScene(url) {
+  if (currentModel) {
+    scene.remove(currentModel);
+    currentModel.traverse((child) => {
+      if (child.isMesh) {
+        child.geometry.dispose();
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material?.dispose();
+      }
+    });
+    // Clear octree
+    worldOctree.subTrees.length = 0;
+    worldOctree.triangles.length = 0;
+  }
+
+  loader.load(url, (gltf) => {
+    currentModel = gltf.scene;
+
+    // Enable shadows on all meshes
+    currentModel.traverse((child) => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+
+    scene.add(currentModel);
+
+    // Auto-center and scale
+    const box = new THREE.Box3().setFromObject(currentModel);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > 50) {
+      const scale = 30 / maxDim;
+      currentModel.scale.setScalar(scale);
+      box.setFromObject(currentModel);
+      box.getCenter(center);
+      box.getSize(size);
+    }
+
+    // Force world matrix update before reading positions (critical after scale)
+    currentModel.updateMatrixWorld(true);
+
+    // --- Parse scene: colliders, spawn, invisible objects ---
+    let foundSpawn = false;
+    let colliderCount = 0;
+    const colliderGroup = new THREE.Group();
+    const toHide = [];
+
+    // Debug: log all nodes to help diagnose
+    console.group('GLB Scene graph:');
+    currentModel.traverse((child) => {
+      const wp = new THREE.Vector3();
+      child.getWorldPosition(wp);
+      const ud = Object.keys(child.userData).length > 0 ? JSON.stringify(child.userData) : '';
+      console.log(`  ${child.type} "${child.name}"${ud ? ' userData=' + ud : ''} local=(${child.position.x.toFixed(2)}, ${child.position.y.toFixed(2)}, ${child.position.z.toFixed(2)}) world=(${wp.x.toFixed(2)}, ${wp.y.toFixed(2)}, ${wp.z.toFixed(2)})`);
+    });
+    console.groupEnd();
+
+    currentModel.traverse((child) => {
+      const userData = child.userData;
+
+      // SpawnPoint detection — match by name (contains "spawn", case-insensitive) or userData
+      const nameMatch = child.name.toLowerCase().includes('spawn');
+      const typeMatch = userData.type === 'SpawnPoint'
+        || userData.type === 'spawn'
+        || userData.spawn === true
+        || userData.spawn === 1;
+
+      if (nameMatch || typeMatch) {
+        const wp = new THREE.Vector3();
+        child.getWorldPosition(wp);
+        spawnPoint.copy(wp);
+        foundSpawn = true;
+        child.visible = false;
+        console.log(`✅ SpawnPoint trouvé via ${nameMatch ? 'name' : 'userData'}: "${child.name}" → world=(${wp.x.toFixed(2)}, ${wp.y.toFixed(2)}, ${wp.z.toFixed(2)})`);
+      }
+
+      // Collider detection: userData custom props OR naming convention
+      //   userData.collider = "box" | "mesh"
+      //   Name: COL_ or _COL → mesh collider, BOX_ or _BOX → box collider
+      const parentData = child.parent?.userData || {};
+      const colliderProp = userData.collider || parentData.collider;
+      const invisibleProp = userData.invisible || parentData.invisible;
+
+      const nameUpper = child.name.toUpperCase();
+      const nameCollider = nameUpper.startsWith('COL_') || nameUpper.includes('_COL') ? 'mesh'
+        : nameUpper.startsWith('BOX_') || nameUpper.includes('_BOX') ? 'box'
+        : null;
+
+      const finalCollider = colliderProp || nameCollider;
+
+      if (child.isMesh && finalCollider) {
+        const colliderType = finalCollider;
+
+        if (colliderType === 'box') {
+          const objBox = new THREE.Box3().setFromObject(child);
+          const objSize = objBox.getSize(new THREE.Vector3());
+          const objCenter = objBox.getCenter(new THREE.Vector3());
+          const boxGeom = new THREE.BoxGeometry(objSize.x, objSize.y, objSize.z);
+          const boxMesh = new THREE.Mesh(boxGeom);
+          boxMesh.position.copy(objCenter);
+          colliderGroup.add(boxMesh);
+          colliderCount++;
+          console.log(`  collider[box]: "${child.name}" size=(${objSize.x.toFixed(2)}, ${objSize.y.toFixed(2)}, ${objSize.z.toFixed(2)})`);
+        } else if (colliderType === 'mesh') {
+          // Clone geometry and bake world transform into vertices
+          const geom = child.geometry.clone();
+          geom.applyMatrix4(child.matrixWorld);
+          const colMesh = new THREE.Mesh(geom);
+          colliderGroup.add(colMesh);
+          colliderCount++;
+          console.log(`  collider[mesh]: "${child.name}" tris=${geom.index ? geom.index.count / 3 : '?'}`);
+        }
+
+        if (invisibleProp) {
+          toHide.push(child);
+        }
+      }
+    });
+
+    // Hide invisible wall objects
+    toHide.forEach(obj => obj.visible = false);
+
+    // Build octree for collisions
+    if (colliderCount > 0) {
+      worldOctree.fromGraphNode(colliderGroup);
+      console.log(`Octree: ${colliderCount} collider(s) chargé(s) depuis le GLB`);
+    } else {
+      // No colliders defined — only use the invisible floor so the player can walk freely
+      console.log('⚠ Aucun collider trouvé dans le GLB — seul le sol invisible est actif');
+      console.log('  → Utilise le script Blender pour marquer les objets collidables');
+    }
+    worldOctree.fromGraphNode(floorMesh);
+
+    // Spawn — default to center of the scene at eye height, not above the roof
+    if (!foundSpawn) {
+      spawnPoint.set(center.x, box.min.y + PLAYER_HEIGHT, center.z);
+      console.log(`Pas de SpawnPoint — spawn au centre/sol: (${spawnPoint.x.toFixed(2)}, ${spawnPoint.y.toFixed(2)}, ${spawnPoint.z.toFixed(2)})`);
+    }
+    spawnParams.spawnX = +spawnPoint.x.toFixed(2);
+    spawnParams.spawnY = +spawnPoint.y.toFixed(2);
+    spawnParams.spawnZ = +spawnPoint.z.toFixed(2);
+    resetPlayer();
+
+    console.log(`Scène chargée: ${url} — taille: ${size.x.toFixed(1)} x ${size.y.toFixed(1)} x ${size.z.toFixed(1)}`);
+  },
+  (progress) => {
+    if (progress.total) console.log(`Chargement: ${(progress.loaded / progress.total * 100).toFixed(0)}%`);
+  },
+  (err) => console.error('Erreur de chargement:', err));
+}
+
+// Scene picker
+const select = document.getElementById('scene-select');
+select.addEventListener('change', () => loadScene(select.value));
+loadScene(select.value);
+
+// --- Resize ---
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+// --- Loop ---
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  updateMovement(clock.getDelta());
+
+  // Sync GUI position display (only when not manipulating, to avoid fighting the sliders)
+  if (!manipulateMode) {
+    playerParams.posX = +camera.position.x.toFixed(2);
+    playerParams.posY = +camera.position.y.toFixed(2);
+    playerParams.posZ = +camera.position.z.toFixed(2);
+  }
+
+  composer.render();
+}
+animate();
+</script>
+
+</body>
+</html>
