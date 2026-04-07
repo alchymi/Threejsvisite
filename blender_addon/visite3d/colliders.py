@@ -1,24 +1,7 @@
-# ============================================================
-# 3D Visite — Blender Scene Setup Script
-# ============================================================
-# Usage:
-#   1. Open your scene in Blender
-#   2. Open this script in the Scripting tab
-#   3. Use the buttons in the sidebar (N panel > 3D Visite)
-#
-# Workflow:
-#   - Select objects and click "Add Collider" to mark them
-#     as collidable (box, mesh, or invisible wall)
-#   - Place the 3D cursor where you want the player to spawn,
-#     then click "Set Spawn Point"
-#   - Export as GLB with "Custom Properties" checked
-# ============================================================
-
 import bpy
-from mathutils import Vector
 
 # -----------------------------------------------------------
-# Custom property helpers
+# Constants & Helpers
 # -----------------------------------------------------------
 
 COLLIDER_TYPES = [
@@ -31,7 +14,6 @@ SPAWN_NAME = "SpawnPoint"
 
 
 def set_collider(obj, collider_type):
-    """Set or remove the 'collider' custom property."""
     if collider_type == "none":
         if "collider" in obj:
             del obj["collider"]
@@ -68,7 +50,6 @@ class VISITE3D_OT_AddCollider(bpy.types.Operator):
 
                 # Add naming convention prefix (reliable GLB export)
                 name = obj.name
-                # Remove existing prefixes
                 for prefix in ('COL_', 'BOX_'):
                     if name.upper().startswith(prefix):
                         name = name[4:]
@@ -76,12 +57,18 @@ class VISITE3D_OT_AddCollider(bpy.types.Operator):
 
                 if self.collider_type == "box":
                     obj.name = f"BOX_{name}"
-                    obj.color = (0.2, 0.8, 0.2, 0.6)  # green
+                    obj.color = (0.2, 0.8, 0.2, 0.6)
                 elif self.collider_type == "mesh":
                     obj.name = f"COL_{name}"
-                    obj.color = (0.2, 0.4, 1.0, 0.6)  # blue
+                    obj.color = (0.2, 0.4, 1.0, 0.6)
                 else:
-                    obj.color = (1, 1, 1, 1)  # reset
+                    # Remove prefix on "none"
+                    for prefix in ('COL_', 'BOX_'):
+                        if name.upper().startswith(prefix):
+                            name = name[4:]
+                            break
+                    obj.name = name
+                    obj.color = (1, 1, 1, 1)
 
         self.report({'INFO'}, f"Collider '{self.collider_type}' set on {count} object(s)")
         return {'FINISHED'}
@@ -100,7 +87,14 @@ class VISITE3D_OT_AddInvisibleWall(bpy.types.Operator):
                 set_collider(obj, "box")
                 obj["invisible"] = True
                 obj.display_type = 'WIRE'
-                obj.color = (1.0, 0.3, 0.1, 0.4)  # orange wire
+                obj.color = (1.0, 0.3, 0.1, 0.4)
+
+                name = obj.name
+                for prefix in ('COL_', 'BOX_'):
+                    if name.upper().startswith(prefix):
+                        name = name[4:]
+                        break
+                obj.name = f"BOX_{name}"
                 count += 1
 
         self.report({'INFO'}, f"{count} invisible wall(s) created")
@@ -116,7 +110,6 @@ class VISITE3D_OT_SetSpawnPoint(bpy.types.Operator):
     def execute(self, context):
         cursor_loc = context.scene.cursor.location.copy()
 
-        # Find or create SpawnPoint
         spawn = bpy.data.objects.get(SPAWN_NAME)
         if spawn is None:
             spawn = bpy.data.objects.new(SPAWN_NAME, None)
@@ -150,8 +143,8 @@ class VISITE3D_OT_SelectColliders(bpy.types.Operator):
 
 class VISITE3D_OT_ShowStats(bpy.types.Operator):
     bl_idname = "visite3d.show_stats"
-    bl_label = "Show Stats"
-    bl_description = "Show collider stats for the scene"
+    bl_label = "Scene Stats"
+    bl_description = "Show collider and spawn stats for the scene"
 
     def execute(self, context):
         box_count = 0
@@ -169,7 +162,34 @@ class VISITE3D_OT_ShowStats(bpy.types.Operator):
                 mesh_count += 1
 
         self.report({'INFO'},
-            f"Box: {box_count} ({invis_count} invisible) | Mesh: {mesh_count} | Spawn: {'Yes' if has_spawn else 'NO'}")
+            f"Box: {box_count} ({invis_count} invis) | Mesh: {mesh_count} | Spawn: {'Yes' if has_spawn else 'NO'}")
+        return {'FINISHED'}
+
+
+class VISITE3D_OT_QuickExportGLB(bpy.types.Operator):
+    bl_idname = "visite3d.quick_export_glb"
+    bl_label = "Quick Export GLB"
+    bl_description = "Export scene as GLB with custom properties enabled"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        import os
+        blend_path = bpy.data.filepath
+        if not blend_path:
+            self.report({'ERROR'}, "Save the .blend file first")
+            return {'CANCELLED'}
+
+        export_path = os.path.splitext(blend_path)[0] + ".glb"
+
+        bpy.ops.export_scene.gltf(
+            filepath=export_path,
+            export_format='GLB',
+            export_extras=True,        # Custom Properties
+            export_cameras=False,
+            export_lights=False,
+        )
+
+        self.report({'INFO'}, f"Exported: {os.path.basename(export_path)}")
         return {'FINISHED'}
 
 
@@ -177,12 +197,13 @@ class VISITE3D_OT_ShowStats(bpy.types.Operator):
 # Panel
 # -----------------------------------------------------------
 
-class VISITE3D_PT_Panel(bpy.types.Panel):
-    bl_label = "3D Visite"
-    bl_idname = "VISITE3D_PT_panel"
+class VISITE3D_PT_ColliderPanel(bpy.types.Panel):
+    bl_label = "Scene Setup"
+    bl_idname = "VISITE3D_PT_collider_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "3D Visite"
+    bl_order = 0
 
     def draw(self, context):
         layout = self.layout
@@ -202,14 +223,13 @@ class VISITE3D_PT_Panel(bpy.types.Panel):
         box.operator("visite3d.add_invisible_wall", icon='GHOST_ENABLED')
         box.operator("visite3d.select_colliders", icon='RESTRICT_SELECT_OFF')
 
-        # Show collider info for active object
         obj = context.active_object
         if obj and obj.type == 'MESH':
             c = get_collider(obj)
             if c:
-                box.label(text=f"Active: {obj.name} → {c}", icon='CHECKMARK')
+                box.label(text=f"Active: {obj.name} [{c}]", icon='CHECKMARK')
             else:
-                box.label(text=f"Active: {obj.name} → no collider", icon='DOT')
+                box.label(text=f"Active: {obj.name} [no collider]", icon='DOT')
 
         # --- Spawn ---
         box2 = layout.box()
@@ -223,7 +243,9 @@ class VISITE3D_PT_Panel(bpy.types.Panel):
         else:
             box2.label(text="No spawn point set", icon='ERROR')
 
-        # --- Stats ---
+        # --- Export & Stats ---
+        layout.separator()
+        layout.operator("visite3d.quick_export_glb", icon='EXPORT')
         layout.operator("visite3d.show_stats", icon='INFO')
 
 
@@ -237,16 +259,16 @@ classes = [
     VISITE3D_OT_SetSpawnPoint,
     VISITE3D_OT_SelectColliders,
     VISITE3D_OT_ShowStats,
-    VISITE3D_PT_Panel,
+    VISITE3D_OT_QuickExportGLB,
+    VISITE3D_PT_ColliderPanel,
 ]
+
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
+
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-
-if __name__ == "__main__":
-    register()
